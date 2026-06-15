@@ -137,31 +137,110 @@ function currentStatus(adapter: ProviderAdapter): HudStatus {
 
 /**
  * Owns the widget lifecycle + background fetch scheduling for one pi process.
- * Methods are no-ops when the active model's provider has no adapter here.
+ *
+ * Rendering strategy: the widget is mounted ONCE via the component-factory
+ * form of `ctx.ui.setWidget`. We never call `setWidget` again — updates are
+ * pushed by recomputing a cached line and calling `tui.requestRender()`.
+ *
+ * Why this matters: pi's `setWidget` does `map.delete(key)` + `map.set(key)`
+ * on every call, so a widget that is re-set frequently sinks to the BOTTOM
+ * of the below-editor stack. The factory form is mounted a single time, so
+ * its slot in the stack is stable. Because usage-hud is a global extension
+ * (loaded before npm packages like pi-lens / powerline / workflows), its
+ * `session_start` handler runs first, so this one-time mount lands at the
+ * TOP of the below-editor stack — directly under the input box — and stays
+ * there even as other widgets grow beneath it.
  */
 class HudController {
 	private interval: ReturnType<typeof setInterval> | null = null;
 	/** Guards against overlapping background fetches. */
 	private fetching = false;
+	/** Whether the factory-form widget has been mounted this session. */
+	private mounted = false;
+	/** Render callback captured from the factory's `tui`, used to refresh. */
+	private requestRender: (() => void) | null = null;
+	/** Theme captured at mount time (factory closure), used to color the line. */
+	private theme: { fg(color: string, text: string): string } | null = null;
+	/** Most-recent event context (model/provider resolution). */
+	private ctx: ExtensionContext | null = null;
+	/** Last computed HUD line (already themed). */
+	private cachedLine = "";
+	/** Whether the line should currently be visible (provider has an adapter). */
+	private visible = false;
 
-	paint(ctx: ExtensionContext): void {
-		const adapter = adapterFor(ctx.model?.provider);
-		if (!adapter) return;
-		const line = renderHudLine(ctx.ui.theme, currentStatus(adapter));
-		ctx.ui.setWidget(WIDGET_NAME, [line], { placement: "belowEditor" });
-	}
-
-	/** Repaint from cache immediately, then refresh from the network if due. */
-	async refreshAndPaint(ctx: ExtensionContext): Promise<void> {
-		const adapter = adapterFor(ctx.model?.provider);
-		if (!adapter) return;
-		const apiKey = resolveApiKey(adapter);
-		if (!apiKey) {
-			this.paint(ctx);
+	/** Recompute the cached line from live data. Does not trigger a render. */
+	private computeLine(): void {
+		const adapter = adapterFor(this.ctx?.model?.provider);
+		if (!adapter || !this.theme) {
+			this.visible = false;
+			this.cachedLine = "";
 			return;
 		}
-		this.paint(ctx);
-		if (!shouldFetch(adapter.name) || this.fetching) return;
+		this.visible = true;
+		this.cachedLine = renderHudLine(this.theme, currentStatus(adapter));
+	}
+
+	/** Recompute the line from live data and ask pi to re-render the widget. */
+	private repaint(): void {
+		this.computeLine();
+		this.requestRender?.();
+	}
+
+	/**
+	 * Mount the widget once (factory form). Idempotent within a session:
+	 * subsequent calls just refresh the cached line.
+	 */
+	mount(ctx: ExtensionContext): void {
+		this.ctx = ctx;
+		if (this.mounted) {
+			this.repaint();
+			return;
+		}
+		ctx.ui.setWidget(
+			WIDGET_NAME,
+			(
+				tui: { requestRender(): void },
+				theme: { fg(color: string, text: string): string },
+			) => {
+				this.theme = theme;
+				this.requestRender = () => tui.requestRender();
+				this.computeLine(); // prime cache before first paint (no render during setWidget)
+				return {
+					render: () => (this.visible ? [this.cachedLine] : []),
+					invalidate: () => {},
+				};
+			},
+			{ placement: "belowEditor" },
+		);
+		this.mounted = true;
+	}
+
+	/** Forget the mount so the next `session_start` re-mounts at the top. */
+	unmount(): void {
+		this.mounted = false;
+		this.requestRender = null;
+	}
+
+	/** Update context + repaint from cache (no network). Hides the line when
+	 *  the active provider has no adapter, while keeping the slot pinned. */
+	update(ctx: ExtensionContext): void {
+		this.ctx = ctx;
+		this.repaint();
+	}
+
+	/** Cooldown-guarded background refresh (session_start / agent_end / tick). */
+	async refresh(ctx: ExtensionContext): Promise<void> {
+		this.ctx = ctx;
+		const adapter = adapterFor(ctx.model?.provider);
+		if (!adapter || !shouldFetch(adapter.name) || this.fetching) {
+			this.repaint();
+			return;
+		}
+		const apiKey = resolveApiKey(adapter);
+		if (!apiKey) {
+			this.repaint();
+			return;
+		}
 		this.fetching = true;
 		try {
 			const result = await adapter.fetch(apiKey);
@@ -172,18 +251,55 @@ class HudController {
 		} finally {
 			this.fetching = false;
 		}
-		this.paint(ctx);
+		this.repaint();
+	}
+
+	/** Forced refresh for the `/usage-hud` command (bypasses the cooldown). */
+	async refreshNow(ctx: ExtensionContext): Promise<void> {
+		this.ctx = ctx;
+		const adapter = adapterFor(ctx.model?.provider);
+		if (!adapter) {
+			ctx.ui.notify(
+				`当前 provider (${ctx.model?.provider ?? "none"}) 没有用量 fetcher（支持：${PROVIDERS.map((p) => p.name).join(", ")}）`,
+				"info",
+			);
+			this.repaint();
+			return;
+		}
+		const apiKey = resolveApiKey(adapter);
+		if (!apiKey) {
+			ctx.ui.notify(credsHint(adapter), "warning");
+			this.repaint();
+			return;
+		}
+		try {
+			const result = await adapter.fetch(apiKey);
+			if (result.ok) {
+				writeSuccess(adapter.name, result.usage);
+				ctx.ui.notify(`${adapter.name} 用量已刷新`, "info");
+			} else {
+				writeError(adapter.name, result.reason, result.message);
+				ctx.ui.notify(`刷新失败：${result.reason}`, "error");
+			}
+		} catch (e) {
+			writeError(adapter.name, "network", String(e));
+			ctx.ui.notify("刷新失败：network", "error");
+		}
+		this.repaint();
 	}
 
 	startInterval(ctx: ExtensionContext): void {
 		this.stopInterval();
+		this.ctx = ctx;
 		this.interval = setInterval(() => {
-			if (!adapterFor(ctx.model?.provider)) return;
-			// Cheap repaint from cache; only fetch when cooldown elapses.
-			if (shouldFetch(ctx.model!.provider!) && !this.fetching) {
-				void this.refreshAndPaint(ctx);
+			const provider = this.ctx?.model?.provider;
+			if (!adapterFor(provider)) return;
+			// Cheap repaint from cache keeps the reset countdown fresh; only
+			// hit the network when the cooldown has elapsed.
+			if (shouldFetch(provider!) && !this.fetching) {
+				void this.refresh(this.ctx!);
 			} else {
-				this.paint(ctx);
+				this.repaint();
 			}
 		}, TICK_MS);
 	}
@@ -194,69 +310,48 @@ class HudController {
 			this.interval = null;
 		}
 	}
-
-	clearWidget(ctx: ExtensionContext): void {
-		ctx.ui.setWidget(WIDGET_NAME, undefined);
-	}
-}
-
-/** One-time manual fetch + repaint, bypassing the cooldown. */
-async function manualRefresh(ctx: ExtensionContext): Promise<void> {
-	const adapter = adapterFor(ctx.model?.provider);
-	if (!adapter) {
-		ctx.ui.notify(
-			`当前 provider (${ctx.model?.provider ?? "none"}) 没有用量 fetcher（支持：${PROVIDERS.map((p) => p.name).join(", ")}）`,
-			"info",
-		);
-		return;
-	}
-	const apiKey = resolveApiKey(adapter);
-	if (!apiKey) {
-		ctx.ui.notify(credsHint(adapter), "warning");
-		return;
-	}
-	const result = await adapter.fetch(apiKey);
-	if (result.ok) {
-		writeSuccess(adapter.name, result.usage);
-		ctx.ui.notify(`${adapter.name} 用量已刷新`, "info");
-	} else {
-		writeError(adapter.name, result.reason, result.message);
-		ctx.ui.notify(`刷新失败：${result.reason}`, "error");
-	}
 }
 
 export default function (pi: ExtensionAPI): void {
 	const hud = new HudController();
 
 	pi.on("session_start", (_event, ctx) => {
-		if (!ctx.hasUI || !adapterFor(ctx.model?.provider)) return;
-		void hud.refreshAndPaint(ctx);
+		if (!ctx.hasUI) return;
+		// Mount first so we claim the top slot of the below-editor stack
+		// (global extensions load before npm packages → our handler runs
+		// first). Mounting is idempotent; later session_starts just refresh.
+		hud.mount(ctx);
+		void hud.refresh(ctx);
 		hud.startInterval(ctx);
 	});
 
 	pi.on("model_select", (_event, ctx) => {
 		if (!ctx.hasUI) return;
 		if (adapterFor(ctx.model?.provider)) {
-			void hud.refreshAndPaint(ctx);
+			void hud.refresh(ctx);
 			hud.startInterval(ctx);
 		} else {
 			hud.stopInterval();
-			hud.clearWidget(ctx);
+			// Hide the line (renders empty) WITHOUT re-calling setWidget, so
+			// the slot stays pinned at the top for when a supported model
+			// returns.
+			hud.update(ctx);
 		}
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
-		if (ctx.hasUI && adapterFor(ctx.model?.provider))
-			void hud.refreshAndPaint(ctx);
+		if (ctx.hasUI) void hud.refresh(ctx);
 	});
 
-	pi.on("session_shutdown", () => hud.stopInterval());
+	pi.on("session_shutdown", () => {
+		hud.stopInterval();
+		hud.unmount();
+	});
 
 	pi.registerCommand("usage-hud", {
 		description: "强制刷新用量 HUD",
 		handler: async (_args, ctx) => {
-			await manualRefresh(ctx);
-			if (ctx.hasUI) hud.paint(ctx);
+			await hud.refreshNow(ctx);
 		},
 	});
 }
