@@ -10,7 +10,7 @@
  *   >= 90 → error   (red)
  *
  * The line shape:
- *   Usage  5h █░░░░░░░░ 1% ↻3.7h  ·  7d █░░░░░░░░ 4% ↻2.9d
+ *   Usage  5h █░░░░░░░░ 1% ⴵ 1h24m  ·  7d █░░░░░░░░ 4% ⴵ 2d7h
  */
 
 import type { ProviderUsage } from "./provider.js";
@@ -38,14 +38,25 @@ function bar(pct: number, width: number): string {
   return "█".repeat(filled) + "░".repeat(width - filled);
 }
 
-/** Compact reset countdown: "45m" / "3.7h" / "2.9d" / "now". */
+/**
+ * Compact reset countdown: "45m" / "1h24m" / "1d19h" / "now".
+ * ≥1d drops the minutes column for compactness ("1d19h", not "1d19h3m");
+ * trailing zero components are omitted ("2h" / "1d", not "2h0m" / "1d0h").
+ */
 function resetCountdown(iso: string): string {
   const ms = new Date(iso).getTime() - Date.now();
   if (ms <= 0) return "now";
-  const h = ms / 3_600_000;
-  if (h < 1) return `${Math.max(1, Math.round(ms / 60_000))}m`;
-  if (h < 48) return `${h.toFixed(1)}h`;
-  return `${(h / 24).toFixed(1)}d`;
+  // Round to whole minutes; never show "0m" when time remains.
+  let totalMin = Math.round(ms / 60_000);
+  if (totalMin < 1) totalMin = 1;
+  const days = Math.floor(totalMin / 1440);
+  const hours = Math.floor((totalMin % 1440) / 60);
+  const mins = totalMin % 60;
+  // ≥1d: days + hours only, minutes dropped. Trailing zero hours omitted.
+  if (days > 0) return hours > 0 ? `${days}d${hours}h` : `${days}d`;
+  // <1d: hours + minutes. Trailing zero minutes omitted.
+  if (hours > 0) return mins > 0 ? `${hours}h${mins}m` : `${hours}h`;
+  return `${mins}m`;
 }
 
 function windowSegment(
