@@ -5,15 +5,6 @@
     "moduleResolution": "Bundler",
     "lib": ["ES2022"],
     "types": ["node"],
-    "typeRoots": [
-      "/Users/mg/.bun/install/global/node_modules/@types",
-      "./node_modules/@types"
-    ],
-    "baseUrl": "/Users/mg/.bun/install/global/node_modules",
-    "paths": {
-      "@earendil-works/*": ["@earendil-works/*"],
-      "typebox": ["typebox"]
-    },
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
