@@ -163,26 +163,20 @@ class HudController {
 	private theme: { fg(color: string, text: string): string } | null = null;
 	/** Most-recent event context (model/provider resolution). */
 	private ctx: ExtensionContext | null = null;
-	/** Last computed HUD line (already themed). */
-	private cachedLine = "";
-	/** Whether the line should currently be visible (provider has an adapter). */
-	private visible = false;
+	/** Last read snapshot, or null when the provider has no adapter (line hidden).
+	 *  We cache the status, not the rendered line: the line depends on the
+	 *  terminal width, which is only known inside `render(width)`. */
+	private cachedStatus: HudStatus | null = null;
 
-	/** Recompute the cached line from live data. Does not trigger a render. */
-	private computeLine(): void {
+	/** Re-read the snapshot from disk. Does not trigger a render. */
+	private computeStatus(): void {
 		const adapter = adapterFor(this.ctx?.model?.provider);
-		if (!adapter || !this.theme) {
-			this.visible = false;
-			this.cachedLine = "";
-			return;
-		}
-		this.visible = true;
-		this.cachedLine = renderHudLine(this.theme, currentStatus(adapter));
+		this.cachedStatus = adapter ? currentStatus(adapter) : null;
 	}
 
-	/** Recompute the line from live data and ask pi to re-render the widget. */
+	/** Re-read the snapshot and ask pi to re-render the widget. */
 	private repaint(): void {
-		this.computeLine();
+		this.computeStatus();
 		this.requestRender?.();
 	}
 
@@ -204,9 +198,14 @@ class HudController {
 			) => {
 				this.theme = theme;
 				this.requestRender = () => tui.requestRender();
-				this.computeLine(); // prime cache before first paint (no render during setWidget)
+				this.computeStatus(); // prime cache before first paint (no render during setWidget)
 				return {
-					render: () => (this.visible ? [this.cachedLine] : []),
+					// renderHudLine fits the line to `width`; pi-tui kills the
+					// process on any line wider than the terminal.
+					render: (width: number) =>
+						this.cachedStatus && this.theme
+							? [renderHudLine(this.theme, this.cachedStatus, width)]
+							: [],
 					invalidate: () => {},
 				};
 			},
