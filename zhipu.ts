@@ -33,8 +33,14 @@ const ENDPOINT = "https://bigmodel.cn/api/monitor/usage/quota/limit";
 interface ApiLimit {
 	unit: number;
 	percentage: number;
-	nextResetTime: number; // epoch ms
+	nextResetTime?: number; // epoch ms; the API occasionally omits it
 }
+
+/** Epoch ms → ISO, or "" when absent/invalid. The HUD renders "" as an
+ *  unknown reset (pace cursor hidden, "now" countdown) instead of throwing
+ *  RangeError and failing the whole fetch. */
+const toIso = (t?: number) =>
+	typeof t === "number" && Number.isFinite(t) ? new Date(t).toISOString() : "";
 
 async function fetchZhipuUsage(
 	apiKey: string,
@@ -80,8 +86,7 @@ async function fetchZhipuUsage(
 		return { ok: false, reason: "parse_error", message: "missing data.limits" };
 	}
 
-	const find = (unit: number) =>
-		json.data!.limits!.find((l) => l.unit === unit);
+	const find = (unit: number) => json.data!.limits!.find((l) => l.unit === unit);
 	const h = find(UNIT_5H);
 	const d = find(UNIT_7D);
 
@@ -89,13 +94,13 @@ async function fetchZhipuUsage(
 		fiveHour: h
 			? {
 					usedPct: h.percentage,
-					resetsAt: new Date(h.nextResetTime).toISOString(),
+					resetsAt: toIso(h.nextResetTime),
 				}
 			: null,
 		sevenDay: d
 			? {
 					usedPct: d.percentage,
-					resetsAt: new Date(d.nextResetTime).toISOString(),
+					resetsAt: toIso(d.nextResetTime),
 				}
 			: null,
 		fetchedAt: new Date().toISOString(),

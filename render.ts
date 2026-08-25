@@ -10,14 +10,18 @@
  *   >= 90 → error   (red)
  *
  * The line shape:
- *   Usage  5h █░░░░░░░░ 1% ⴵ 1h24m  ·  7d █░░░░░░░░ 4% ⴵ 2d7h
+ *   Usage  5h █░░░░░░░░ 1%  1h24m  ·  7d █░░░░░░░░ 4%  2d7h
  *
- * Pace cursor: one bar cell marks where usage would sit under uniform
- * consumption (elapsed fraction of the window). Fill left of it = 富余, fill
- * past it = 偏快. Zero width cost — it replaces a cell instead of adding one:
- * ▎ (dim) in the unfilled region, dim █ once the fill has passed it. Hidden
- * when the window just started (<5% elapsed, pace is noise there) or the
- * reset time is unknown/unparseable/already past.
+ * Pace cursor: one bar cell is tinted with the theme's accent color to mark
+ * where usage would sit under uniform consumption (elapsed fraction of the
+ * window). Fill left of it = 富余, fill past it = 偏快. Zero width cost —
+ * it recolors a cell instead of adding one, so the bar's texture stays
+ * unbroken. Hidden when the window just started (<5% elapsed, pace is noise
+ * there) or the reset time is unknown/unparseable/already past.
+ *
+ * The countdown icon is an hourglass showing the remaining fraction of the
+ * window:  full (just reset) →  half →  nearly empty →  empty
+ * (reset due now).
  *
  * Width contract: pi-tui's `doRender` throws (and kills the process) when any
  * rendered line is wider than the terminal, so every string returned from here
@@ -44,7 +48,7 @@ export type HudStatus =
  * single-column in pi-tui's measurement; anything else (CJK hints, emoji)
  * counts as 2 — over-estimating only truncates earlier, never overflows.
  */
-const NARROW_GLYPHS = new Set(["█", "░", "▎", "ⴵ", "·", "⚠"]);
+const NARROW_GLYPHS = new Set(["█", "░", "", "", "", "", "·", ""]);
 function charWidth(ch: string): number {
  const cp = ch.codePointAt(0);
  if (cp !== undefined && cp < 0x80) return 1;
@@ -103,8 +107,25 @@ function paceMarker(
  return Math.min(barWidth - 1, Math.round(elapsed * barWidth));
 }
 
-/** One bar cell: glyph + whether it takes the pct color or dim (cursor). */
-type BarCell = { ch: string; dim: boolean };
+/**
+ * Hourglass icon for the reset countdown, by remaining fraction of the
+ * window:  full (>2/3 left) →  half →  nearly empty (≤1/3) → 
+ * empty (reset due now). Unknown/unparseable reset falls through to
+ * empty, matching the "now" countdown shown in that case.
+ */
+function resetIcon(label: string, win: WindowUsage | null): string {
+ const windowMs = WINDOW_MS[label];
+ const resetMs = win ? new Date(win.resetsAt).getTime() : NaN;
+ if (!windowMs || Number.isNaN(resetMs)) return "\u{f250}";
+ const remaining = (resetMs - Date.now()) / windowMs;
+ if (remaining <= 0) return "\u{f250}";
+ if (remaining <= 1 / 3) return "\u{f253}";
+ if (remaining <= 2 / 3) return "\u{f252}";
+ return "\u{f251}";
+}
+
+/** One bar cell: glyph + whether it takes the accent color (pace cursor). */
+type BarCell = { ch: string; accent: boolean };
 
 function barCells(pct: number, width: number, marker: number): BarCell[] {
  const clamped = Math.max(0, Math.min(100, pct));
@@ -113,8 +134,7 @@ function barCells(pct: number, width: number, marker: number): BarCell[] {
  if (clamped > 0 && filled === 0) filled = 1;
  const cells: BarCell[] = [];
  for (let i = 0; i < width; i++) {
-  if (i === marker) cells.push({ ch: i < filled ? "█" : "▎", dim: true });
-  else cells.push({ ch: i < filled ? "█" : "░", dim: false });
+  cells.push({ ch: i < filled ? "█" : "░", accent: i === marker });
  }
  return cells;
 }
@@ -126,7 +146,8 @@ function barCells(pct: number, width: number, marker: number): BarCell[] {
  */
 function resetCountdown(iso: string): string {
  const ms = new Date(iso).getTime() - Date.now();
- if (ms <= 0) return "now";
+ // Unknown/unparseable reset counts down "now", matching the empty hourglass.
+ if (!Number.isFinite(ms) || ms <= 0) return "now";
  // Round to whole minutes; never show "0m" when time remains.
  let totalMin = Math.round(ms / 60_000);
  if (totalMin < 1) totalMin = 1;
@@ -157,7 +178,7 @@ function windowSegment(
  let width = label.length;
  if (barWidth > 0) {
   const cells = barCells(usedPct, barWidth, paceMarker(label, win, barWidth))
-   .map((c) => theme.fg(c.dim ? "dim" : color, c.ch))
+   .map((c) => theme.fg(c.accent ? "accent" : color, c.ch))
    .join("");
   parts.push(cells);
   width += 1 + barWidth;
@@ -166,22 +187,14 @@ function windowSegment(
  width += 1 + pct.length;
  if (showReset) {
   // Missing windows count down from "now" → displays "now".
-  const reset = `ⴵ ${resetCountdown(win?.resetsAt ?? new Date().toISOString())}`;
+  const reset = `${resetIcon(label, win)} ${resetCountdown(win?.resetsAt ?? new Date().toISOString())}`;
   parts.push(theme.fg("dim", reset));
   width += 1 + reset.length;
  }
  return { width, text: parts.join(" ") };
 }
 
-function windowOf(w: ProviderUsage["fiveHour"]): {
- pct: number;
- resetsAt: string;
-} {
- return {
-  pct: w?.usedPct ?? 0,
-  resetsAt: w?.resetsAt ?? new Date().toISOString(),
- };
-}
+type NamedWindow = { label: string; usage: WindowUsage };
 
 /**
  * Render the HUD as a single themed line that fits `width` terminal columns.
@@ -202,7 +215,7 @@ export function renderHudLine(
  }
 
  const usage = status.usage;
- const warn = status.kind === "stale" ? `  ⚠ ${status.reason}` : "";
+ const warn = status.kind === "stale" ? `  \u{e654} ${status.reason}` : "";
 
  if (!usage) {
   return theme.fg(
@@ -216,41 +229,43 @@ export function renderHudLine(
 
  const head = "Usage ";
  const sep = "  ·  ";
- const five = windowOf(usage.fiveHour);
- const seven = windowOf(usage.sevenDay);
- const fixed = head.length + sep.length + plainWidth(warn);
+ const windows: NamedWindow[] = [];
+ if (usage.fiveHour) windows.push({ label: "5h", usage: usage.fiveHour });
+ if (usage.sevenDay) windows.push({ label: "7d", usage: usage.sevenDay });
+ const fixed =
+  head.length +
+  plainWidth(sep) * (windows.length - 1) +
+  plainWidth(warn);
 
  for (const showReset of [true, false]) {
-  const bare5 = windowSegment(theme, "5h", usage.fiveHour, 0, showReset);
-  const bare7 = windowSegment(theme, "7d", usage.sevenDay, 0, showReset);
-  const base = fixed + bare5.width + bare7.width;
+  const bare = windows.map((window) =>
+   windowSegment(theme, window.label, window.usage, 0, showReset),
+  );
+  const base = fixed + bare.reduce((sum, segment) => sum + segment.width, 0);
   if (base > width) continue;
-  // Both windows get the same bar, and each bar costs a leading space too.
-  const room = Math.floor((width - base - 2) / 2);
+  // Every window gets the same bar; each bar costs one leading space.
+  const room = Math.floor((width - base - windows.length) / windows.length);
   const barWidth = room >= MIN_BAR_WIDTH ? Math.min(BAR_WIDTH, room) : 0;
-  const s5 =
+  const segments =
    barWidth > 0
-    ? windowSegment(theme, "5h", usage.fiveHour, barWidth, showReset)
-    : bare5;
-  const s7 =
-   barWidth > 0
-    ? windowSegment(theme, "7d", usage.sevenDay, barWidth, showReset)
-    : bare7;
+    ? windows.map((window) =>
+       windowSegment(theme, window.label, window.usage, barWidth, showReset),
+      )
+    : bare;
   return (
    theme.fg("dim", head) +
-   s5.text +
-   theme.fg("dim", sep) +
-   s7.text +
+   segments.map((segment) => segment.text).join(theme.fg("dim", sep)) +
    (warn ? theme.fg("dim", warn) : "")
   );
  }
 
- // Narrower than even the barless form (~22 columns): drop the styling and
- // keep whatever numbers fit.
+ // Narrower than the barless form: keep only labels and percentages.
  return theme.fg(
   "dim",
   truncatePlain(
-   `5h ${Math.round(five.pct)}% · 7d ${Math.round(seven.pct)}%`,
+   windows
+    .map((window) => `${window.label} ${Math.round(window.usage.usedPct)}%`)
+    .join(" · "),
    width,
   ),
  );

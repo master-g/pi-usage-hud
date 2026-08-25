@@ -2,21 +2,22 @@
  * usage-hud — shows provider rolling-quota token usage as a progress-bar
  * HUD line below the editor.
  *
- *   Usage  5h █░░░░░░░░░ 1% ↻3.7h  ·  7d █░░░░░░░░░ 4% ↻2.9d
+ *   Usage  5h █░░░░░░░░ 1%  1h24m  ·  7d █░░░░░░░░ 4%  2d7h
  *
  * Provider support lives in sibling fetcher modules (one per provider), each
  * implementing the ProviderAdapter interface from provider.ts.
  * Currently implemented:
  *   - zhipu.ts  → Zhipu / bigmodel   (providers: zhipu, zai-coding-cn, zhipu-coding)
  *   - kimi.ts   → Kimi / moonshot    (providers: kimi-coding, kimi, moonshot)
+ *   - codex.ts  → OpenAI Codex       (provider: openai-codex)
  *
  * To add a provider: add `xxx.ts` exporting a ProviderAdapter, then register
  * it in the `PROVIDERS` array below.
  *
  * Design:
  *   - Only renders when the active model's provider has a fetcher here.
- *   - Reads the provider's API key from ~/.pi/agent/auth.json (same key used
- *     for model calls — no separate expiring web dashboard token to maintain).
+ *   - Resolves credentials through pi's model registry, including OAuth token
+ *     refresh. No separate web-dashboard credential is needed.
  *   - Fetches on session_start and after each completed turn (agent_end),
  *     cooldown-guarded via a per-provider snapshot file
  *     (~/.pi/agent/<provider>-quota.json).
@@ -25,9 +26,6 @@
  *   - Errors are surfaced without blanking last-good data.
  */
 
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -35,12 +33,13 @@ import type {
 import type { ProviderAdapter } from "./provider.js";
 import { zhipu } from "./zhipu.js";
 import { kimi } from "./kimi.js";
+import { codex } from "./codex.js";
 import { getStored, shouldFetch, writeError, writeSuccess } from "./store.js";
 import { renderHudLine, type HudStatus } from "./render.js";
 
 // ─── Provider registry ──────────────────────────────────────────────────────
 // Order matters only for diagnostics; dispatch is by provider-name match.
-const PROVIDERS: readonly ProviderAdapter[] = [zhipu, kimi];
+const PROVIDERS: readonly ProviderAdapter[] = [zhipu, kimi, codex];
 
 const PROVIDER_BY_NAME = new Map<string, ProviderAdapter>();
 for (const adapter of PROVIDERS) {
@@ -60,51 +59,41 @@ const TICK_MS = 30_000;
 /** Mark data as stale for display once the last success is older than this. */
 const STALE_MS = 2 * 60_000;
 
-function authFilePath(): string {
-	const piHome = process.env.PI_HOME ?? path.join(os.homedir(), ".pi");
-	return path.join(piHome, "agent", "auth.json");
+/** Find the first configured pi provider that can supply this adapter's credential. */
+function credentialProvider(
+	adapter: ProviderAdapter,
+	ctx: ExtensionContext,
+): string | null {
+	const candidates = [ctx.model?.provider, ...adapter.authKeys];
+	for (const provider of new Set(candidates)) {
+		if (provider && ctx.modelRegistry.getProviderAuthStatus(provider).configured) {
+			return provider;
+		}
+	}
+	return null;
 }
 
-/**
- * Resolve an API key from ~/.pi/agent/auth.json for the given adapter.
- * Tries the adapter's `authKeys` in order; the first non-empty `apiKey`/`key`
- * field wins. Cached per-adapter after first successful read (cleared when a
- * miss happens so a later auth.json edit is picked up on the next attempt).
- */
-const apiKeyCache = new Map<string, string>();
-function resolveApiKey(adapter: ProviderAdapter): string | null {
-	const cached = apiKeyCache.get(adapter.name);
-	if (cached !== undefined) return cached;
-	let resolved: string | null = null;
-	try {
-		const authPath = authFilePath();
-		if (fs.existsSync(authPath)) {
-			const auth = JSON.parse(fs.readFileSync(authPath, "utf8"));
-			for (const key of adapter.authKeys) {
-				const entry = auth[key];
-				const val = entry?.apiKey ?? entry?.key;
-				if (typeof val === "string" && val) {
-					resolved = val;
-					break;
-				}
-			}
-		}
-	} catch {
-		// corrupt or unreadable auth.json — treat as no key
-	}
-	if (resolved) apiKeyCache.set(adapter.name, resolved);
-	return resolved;
+/** Resolve the current credential through pi so expired OAuth tokens refresh. */
+async function resolveCredential(
+	adapter: ProviderAdapter,
+	ctx: ExtensionContext,
+): Promise<string | null> {
+	const provider = credentialProvider(adapter, ctx);
+	if (!provider) return null;
+	return (await ctx.modelRegistry.getApiKeyForProvider(provider)) ?? null;
 }
 
 /** Human-readable credential hint for the no_creds state. */
 function credsHint(adapter: ProviderAdapter): string {
-	return `未找到 ${adapter.name} API key（见 ~/.pi/agent/auth.json 的 ${adapter.authKeys.join(" / ")}）`;
+	return `未找到 ${adapter.name} 凭据（provider: ${adapter.authKeys.join(" / ")}）`;
 }
 
 /** Decide which HUD variant to show from stored snapshot + credential state. */
-function currentStatus(adapter: ProviderAdapter): HudStatus {
-	const apiKey = resolveApiKey(adapter);
-	if (!apiKey) {
+function currentStatus(
+	adapter: ProviderAdapter,
+	hasCredentials: boolean,
+): HudStatus {
+	if (!hasCredentials) {
 		return {
 			kind: "no_creds",
 			providerName: adapter.name,
@@ -170,8 +159,12 @@ class HudController {
 
 	/** Re-read the snapshot from disk. Does not trigger a render. */
 	private computeStatus(): void {
-		const adapter = adapterFor(this.ctx?.model?.provider);
-		this.cachedStatus = adapter ? currentStatus(adapter) : null;
+		const ctx = this.ctx;
+		const adapter = adapterFor(ctx?.model?.provider);
+		this.cachedStatus =
+			adapter && ctx
+				? currentStatus(adapter, credentialProvider(adapter, ctx) !== null)
+				: null;
 	}
 
 	/** Re-read the snapshot and ask pi to re-render the widget. */
@@ -235,22 +228,25 @@ class HudController {
 			this.repaint();
 			return;
 		}
-		const apiKey = resolveApiKey(adapter);
-		if (!apiKey) {
-			this.repaint();
-			return;
-		}
 		this.fetching = true;
 		try {
-			const result = await adapter.fetch(apiKey);
+			let credential: string | null;
+			try {
+				credential = await resolveCredential(adapter, ctx);
+			} catch (e) {
+				writeError(adapter.name, "auth_failed", String(e));
+				return;
+			}
+			if (!credential) return;
+			const result = await adapter.fetch(credential);
 			if (result.ok) writeSuccess(adapter.name, result.usage);
 			else writeError(adapter.name, result.reason, result.message);
 		} catch (e) {
 			writeError(adapter.name, "network", String(e));
 		} finally {
 			this.fetching = false;
+			this.repaint();
 		}
-		this.repaint();
 	}
 
 	/** Forced refresh for the `/usage-hud` command (bypasses the cooldown). */
@@ -265,14 +261,22 @@ class HudController {
 			this.repaint();
 			return;
 		}
-		const apiKey = resolveApiKey(adapter);
-		if (!apiKey) {
+		let credential: string | null;
+		try {
+			credential = await resolveCredential(adapter, ctx);
+		} catch (e) {
+			writeError(adapter.name, "auth_failed", String(e));
+			ctx.ui.notify("刷新失败：auth_failed", "error");
+			this.repaint();
+			return;
+		}
+		if (!credential) {
 			ctx.ui.notify(credsHint(adapter), "warning");
 			this.repaint();
 			return;
 		}
 		try {
-			const result = await adapter.fetch(apiKey);
+			const result = await adapter.fetch(credential);
 			if (result.ok) {
 				writeSuccess(adapter.name, result.usage);
 				ctx.ui.notify(`${adapter.name} 用量已刷新`, "info");
@@ -291,11 +295,11 @@ class HudController {
 		this.stopInterval();
 		this.ctx = ctx;
 		this.interval = setInterval(() => {
-			const provider = this.ctx?.model?.provider;
-			if (!adapterFor(provider)) return;
+			const adapter = adapterFor(this.ctx?.model?.provider);
+			if (!adapter) return;
 			// Cheap repaint from cache keeps the reset countdown fresh; only
 			// hit the network when the cooldown has elapsed.
-			if (shouldFetch(provider!) && !this.fetching) {
+			if (shouldFetch(adapter.name) && !this.fetching) {
 				void this.refresh(this.ctx!);
 			} else {
 				this.repaint();

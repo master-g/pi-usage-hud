@@ -43,9 +43,9 @@ export type FetchResult =
  *   and notifications.
  * - `providerNames`: pi model `provider` values that map to this adapter. The
  *   first entry is the canonical name; the rest are aliases.
- * - `authKeys`: keys in ~/.pi/agent/auth.json to try, in order, when resolving
- *   this provider's API key. The first non-empty `apiKey`/`key` field wins.
- * - `fetch`: performs the live quota request using a bare API key.
+ * - `authKeys`: pi provider IDs to try, in order, when resolving credentials.
+ * - `fetch`: performs the live quota request using the resolved API key or
+ *   OAuth access token.
  */
 export interface ProviderAdapter {
 	readonly name: string;

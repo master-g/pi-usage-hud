@@ -15,7 +15,7 @@ const { visibleWidth } = (await import(
 )) as { visibleWidth(s: string): number };
 
 const theme = {
-  fg: (color: string, text: string) => `\x1b[38;2;1;2;3m${text}\x1b[39m`,
+  fg: (_color: string, text: string) => `\x1b[38;2;1;2;3m${text}\x1b[39m`,
 };
 
 function usage(fivePct: number | null, sevenPct: number | null): ProviderUsage {
@@ -36,7 +36,7 @@ const statuses: HudStatus[] = [
   { kind: "ok", usage: usage(100, 100) },
   { kind: "ok", usage: usage(null, 29) },
   { kind: "ok", usage: usage(null, null) },
-  // The shape that crashed: stale + both windows + a "⚠ network" suffix.
+  // The shape that crashed: stale + both windows + a " network" suffix.
   { kind: "stale", usage: usage(7, 29), reason: "network" },
   { kind: "stale", usage: null, reason: "pending" },
   {
@@ -93,25 +93,47 @@ const atElapsed = (pct: number, elapsed: number): ProviderUsage => ({
 });
 const okLine = (u: ProviderUsage, width = 80) =>
   renderHudLine(theme, { kind: "ok", usage: u }, width);
-const firstBar = (line: string) => stripAnsi(line).match(/[█░▎]+/)?.[0] ?? "";
 
-// Half-way through the window: cursor lands on cell 5 of 10 (the fill boundary
-// when usage is also 50%, and visibly right of the fill at 20%).
-const mid = firstBar(okLine(atElapsed(20, 0.5)));
-if (mid.length !== 10 || mid.indexOf("▎") !== 5) {
-  throw new Error(`cursor misplaced at 50% elapsed: ${JSON.stringify(mid)}`);
+// The cursor is a color tick, not a glyph: a color-distinguishing theme makes
+// it observable. Bar cells are the runs of 10 single-glyph {color}X pairs.
+const ctheme = { fg: (c: string, t: string) => `{${c}}${t}` };
+const okLineC = (u: ProviderUsage, width = 80) =>
+  renderHudLine(ctheme, { kind: "ok", usage: u }, width);
+const barCellRuns = (line: string) => {
+  const runs = line.match(/(?:\{\w+\}[█░]){10}/gu) ?? [];
+  return runs.map((run) =>
+    [...run.matchAll(/\{(\w+)\}([█░])/gu)].map((m) => ({
+      color: m[1],
+      ch: m[2],
+    })),
+  );
+};
+
+// Half-way through the window: the accent tick lands on cell 5 of 10 (the
+// fill boundary when usage is also 50%, visibly right of the fill at 20%).
+const midCells = barCellRuns(okLineC(atElapsed(20, 0.5)))[0] ?? [];
+if (
+  midCells.length !== 10 ||
+  midCells[5].color !== "accent" ||
+  midCells[5].ch !== "░" ||
+  midCells.some((c, i) => i !== 5 && c.color === "accent")
+) {
+  throw new Error(
+    `cursor misplaced at 50% elapsed: ${JSON.stringify(midCells)}`,
+  );
 }
 
-// Window just started (<5% elapsed): cursor hidden, bar identical to before.
-const early = okLine(atElapsed(12, 0.03));
-if (stripAnsi(early).includes("▎"))
+// Window just started (<5% elapsed): cursor hidden.
+if (okLineC(atElapsed(12, 0.03)).includes("{accent}")) {
   throw new Error("cursor shown at 3% elapsed");
+}
 
 // Reset already passed: cursor hidden (nothing left to pace).
-const past = okLine(atElapsed(10, 1.2));
-if (stripAnsi(past).includes("▎")) throw new Error("cursor shown past reset");
+if (okLineC(atElapsed(10, 1.2)).includes("{accent}")) {
+  throw new Error("cursor shown past reset");
+}
 
-// Missing 5h window: no cursor on its bar, but the 7d bar still gets one.
+// Missing 5h window is hidden; the remaining 7d bar still gets a cursor.
 const miss5: ProviderUsage = {
   fiveHour: null,
   sevenDay: {
@@ -120,28 +142,66 @@ const miss5: ProviderUsage = {
   },
   fetchedAt: new Date().toISOString(),
 };
-const bars = stripAnsi(okLine(miss5)).match(/[█░▎]+/g) ?? [];
-if (bars.length !== 2)
-  throw new Error(`expected 2 bars, got: ${JSON.stringify(bars)}`);
-if (bars[0].includes("▎"))
-  throw new Error(`cursor on missing 5h window: ${bars[0]}`);
-if (!bars[1].includes("▎"))
-  throw new Error(`cursor missing on 7d window: ${bars[1]}`);
+const miss5Rendered = okLineC(miss5);
+const missRuns = barCellRuns(miss5Rendered);
+if (missRuns.length !== 1 || miss5Rendered.includes("5h")) {
+  throw new Error(`missing window was rendered: ${JSON.stringify(miss5Rendered)}`);
+}
+if (!missRuns[0].some((c) => c.color === "accent" && c.ch === "░")) {
+  throw new Error(
+    `cursor missing on 7d window: ${JSON.stringify(missRuns[0])}`,
+  );
+}
 
-// Fill past the cursor: the cursor cell renders as a dim █, not ▎.
-// (A color-distinguishing theme; width contract is covered above.)
-const ctheme = { fg: (c: string, t: string) => `{${c}}${t}` };
-const over = renderHudLine(
-  ctheme,
-  { kind: "ok", usage: atElapsed(70, 0.4) },
-  80,
-);
-if (over.includes("▎"))
-  throw new Error("in-fill cursor should render as dim █");
-if (!over.includes("{dim}█")) {
-  throw new Error(`in-fill cursor cell not dimmed: ${JSON.stringify(over)}`);
+// Fill past the cursor: the tick cell keeps the █ glyph, only recolored.
+const overCells = barCellRuns(okLineC(atElapsed(70, 0.4)))[0] ?? [];
+if (overCells[4]?.color !== "accent" || overCells[4]?.ch !== "█") {
+  throw new Error(
+    `in-fill cursor should be an accent █: ${JSON.stringify(overCells)}`,
+  );
 }
 
 console.log(
   "ok — pace cursor: position, hide thresholds, missing window, in-fill",
+);
+
+// ─── Reset hourglass ────────────────────────────────────────────────────────
+// Icon follows the remaining fraction of the window: full → half → nearly
+// empty → empty (past reset / unknown window).
+const FULL = "\u{f251}",
+  HALF = "\u{f252}",
+  EMPTY = "\u{f253}",
+  DONE = "\u{f250}";
+const iconOf = (u: ProviderUsage) => stripAnsi(okLine(u));
+if (!iconOf(atElapsed(10, 0.1)).includes(FULL))
+  throw new Error("expected full hourglass at 90% remaining");
+if (!iconOf(atElapsed(10, 0.5)).includes(HALF))
+  throw new Error("expected half hourglass at 50% remaining");
+if (!iconOf(atElapsed(10, 0.9)).includes(EMPTY))
+  throw new Error("expected empty hourglass at 10% remaining");
+if (!iconOf(atElapsed(10, 1.2)).includes(DONE))
+  throw new Error("expected empty hourglass past reset");
+// Missing 5h window is hidden; its 7d window is half-way to reset.
+const miss5Line = iconOf(miss5);
+if (miss5Line.includes("5h") || miss5Line.includes(DONE) || !miss5Line.includes(HALF)) {
+  throw new Error(`hourglass mismatch for missing window: ${miss5Line}`);
+}
+
+// Unknown/unparseable resetsAt (e.g. zhipu omitting nextResetTime) counts
+// down "now" — never "NaNm" — and hides the pace cursor.
+const unknownReset: ProviderUsage = {
+  fiveHour: { usedPct: 12, resetsAt: "" },
+  sevenDay: null,
+  fetchedAt: new Date().toISOString(),
+};
+const unknownLine = okLineC(unknownReset);
+if (unknownLine.includes("NaN") || !unknownLine.includes("now")) {
+  throw new Error(`unknown reset should count down "now": ${unknownLine}`);
+}
+if (unknownLine.includes("{accent}")) {
+  throw new Error(`cursor shown for unknown reset: ${unknownLine}`);
+}
+
+console.log(
+  "ok — reset hourglass: full / half / nearly-empty / empty / missing",
 );
