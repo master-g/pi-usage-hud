@@ -12,12 +12,13 @@
  * The line shape:
  *   Usage  5h █░░░░░░░░ 1%  1h24m  ·  7d █░░░░░░░░ 4%  2d7h
  *
- * Pace cursor: one bar cell is tinted with the theme's accent color to mark
- * where usage would sit under uniform consumption (elapsed fraction of the
- * window). Fill left of it = 富余, fill past it = 偏快. Zero width cost —
- * it recolors a cell instead of adding one, so the bar's texture stays
- * unbroken. Hidden when the window just started (<5% elapsed, pace is noise
- * there) or the reset time is unknown/unparseable/already past.
+ * Pace cursor: the marker cell is tinted with the theme's accent color AND
+ * drawn as ▎ when unfilled (█ once the fill reaches it), so it stays
+ * recognizable by shape even in themes where accent ≈ the fill color.
+ * Fill left of it = 富余, fill past it = 偏快. Zero width cost — it replaces
+ * a cell instead of adding one. Hidden when the window just started (<5%
+ * elapsed, pace is noise there) or the reset time is unknown/unparseable/
+ * already past.
  *
  * The countdown icon is an hourglass showing the remaining fraction of the
  * window:  full (just reset) →  half →  nearly empty →  empty
@@ -48,7 +49,7 @@ export type HudStatus =
  * single-column in pi-tui's measurement; anything else (CJK hints, emoji)
  * counts as 2 — over-estimating only truncates earlier, never overflows.
  */
-const NARROW_GLYPHS = new Set(["█", "░", "", "", "", "", "·", ""]);
+const NARROW_GLYPHS = new Set(["█", "░", "▎", "", "", "", "", "·", ""]);
 function charWidth(ch: string): number {
  const cp = ch.codePointAt(0);
  if (cp !== undefined && cp < 0x80) return 1;
@@ -134,7 +135,8 @@ function barCells(pct: number, width: number, marker: number): BarCell[] {
  if (clamped > 0 && filled === 0) filled = 1;
  const cells: BarCell[] = [];
  for (let i = 0; i < width; i++) {
-  cells.push({ ch: i < filled ? "█" : "░", accent: i === marker });
+  const ch = i === marker ? (i < filled ? "█" : "▎") : i < filled ? "█" : "░";
+  cells.push({ ch, accent: i === marker });
  }
  return cells;
 }
@@ -233,9 +235,7 @@ export function renderHudLine(
  if (usage.fiveHour) windows.push({ label: "5h", usage: usage.fiveHour });
  if (usage.sevenDay) windows.push({ label: "7d", usage: usage.sevenDay });
  const fixed =
-  head.length +
-  plainWidth(sep) * (windows.length - 1) +
-  plainWidth(warn);
+  head.length + plainWidth(sep) * (windows.length - 1) + plainWidth(warn);
 
  for (const showReset of [true, false]) {
   const bare = windows.map((window) =>

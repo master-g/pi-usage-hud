@@ -100,9 +100,9 @@ const ctheme = { fg: (c: string, t: string) => `{${c}}${t}` };
 const okLineC = (u: ProviderUsage, width = 80) =>
   renderHudLine(ctheme, { kind: "ok", usage: u }, width);
 const barCellRuns = (line: string) => {
-  const runs = line.match(/(?:\{\w+\}[█░]){10}/gu) ?? [];
+  const runs = line.match(/(?:\{\w+\}[█░▎]){10}/gu) ?? [];
   return runs.map((run) =>
-    [...run.matchAll(/\{(\w+)\}([█░])/gu)].map((m) => ({
+    [...run.matchAll(/\{(\w+)\}([█░▎])/gu)].map((m) => ({
       color: m[1],
       ch: m[2],
     })),
@@ -110,12 +110,13 @@ const barCellRuns = (line: string) => {
 };
 
 // Half-way through the window: the accent tick lands on cell 5 of 10 (the
-// fill boundary when usage is also 50%, visibly right of the fill at 20%).
+// fill boundary when usage is also 50%, visibly right of the fill at 20%),
+// drawn as ▎ while unfilled.
 const midCells = barCellRuns(okLineC(atElapsed(20, 0.5)))[0] ?? [];
 if (
   midCells.length !== 10 ||
   midCells[5].color !== "accent" ||
-  midCells[5].ch !== "░" ||
+  midCells[5].ch !== "▎" ||
   midCells.some((c, i) => i !== 5 && c.color === "accent")
 ) {
   throw new Error(
@@ -145,9 +146,11 @@ const miss5: ProviderUsage = {
 const miss5Rendered = okLineC(miss5);
 const missRuns = barCellRuns(miss5Rendered);
 if (missRuns.length !== 1 || miss5Rendered.includes("5h")) {
-  throw new Error(`missing window was rendered: ${JSON.stringify(miss5Rendered)}`);
+  throw new Error(
+    `missing window was rendered: ${JSON.stringify(miss5Rendered)}`,
+  );
 }
-if (!missRuns[0].some((c) => c.color === "accent" && c.ch === "░")) {
+if (!missRuns[0].some((c) => c.color === "accent" && c.ch === "▎")) {
   throw new Error(
     `cursor missing on 7d window: ${JSON.stringify(missRuns[0])}`,
   );
@@ -183,7 +186,11 @@ if (!iconOf(atElapsed(10, 1.2)).includes(DONE))
   throw new Error("expected empty hourglass past reset");
 // Missing 5h window is hidden; its 7d window is half-way to reset.
 const miss5Line = iconOf(miss5);
-if (miss5Line.includes("5h") || miss5Line.includes(DONE) || !miss5Line.includes(HALF)) {
+if (
+  miss5Line.includes("5h") ||
+  miss5Line.includes(DONE) ||
+  !miss5Line.includes(HALF)
+) {
   throw new Error(`hourglass mismatch for missing window: ${miss5Line}`);
 }
 
