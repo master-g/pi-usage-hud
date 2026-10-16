@@ -1,5 +1,5 @@
 {
-	"name": "@master-g/pi-usage-hud",
+	"name": "@master.g/pi-usage-hud",
 	"version": "0.1.0",
 	"description": "Persistent pi HUD showing the subscription usage of the current model's provider (Codex, Kimi, Zhipu)",
 	"type": "module",

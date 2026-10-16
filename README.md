@@ -1,4 +1,4 @@
-# @master-g/pi-usage-hud
+# @master.g/pi-usage-hud
 
 A small [pi](https://pi.dev) extension that keeps the subscription usage of the **current model's provider** pinned in the HUD, so you always know how much of your plan is left before the next request.
 
@@ -15,7 +15,7 @@ Other providers show nothing — the HUD stays out of the way.
 ## Install
 
 ```bash
-pi install npm:@master-g/pi-usage-hud
+pi install npm:@master.g/pi-usage-hud
 ```
 
 Then restart pi. The HUD line appears once a supported provider is active.
