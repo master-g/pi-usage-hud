@@ -1,20 +1,15 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "lib": ["ES2022"],
-    "types": ["node"],
-    "paths": {
-      "@earendil-works/pi-coding-agent": [
-        "/Users/mg/.bun/install/global/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"
-      ]
-    },
-    "strict": true,
-    "skipLibCheck": true,
-    "noEmit": true,
-    "allowImportingTsExtensions": true,
-    "verbatimModuleSyntax": false
-  },
-  "include": ["*.ts"]
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "Bundler",
+		"lib": ["ES2022"],
+		"types": ["node"],
+		"strict": true,
+		"skipLibCheck": true,
+		"noEmit": true,
+		"allowImportingTsExtensions": true,
+		"verbatimModuleSyntax": false
+	},
+	"include": ["*.ts"]
 }
