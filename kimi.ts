@@ -30,6 +30,7 @@
  * so ordering changes in the API response don't break us.
  */
 
+import { getJson } from "./provider.js";
 import type {
 	ProviderAdapter,
 	ProviderUsage,
@@ -37,6 +38,10 @@ import type {
 } from "./provider.js";
 
 const ENDPOINT = "https://api.kimi.com/coding/v1/usages";
+
+/** The product windows kimi data is normalized into (see file header). */
+const FIVE_H_MS = 5 * 3600_000;
+const SEVEN_D_MS = 7 * 24 * 3600_000;
 
 /** used/limit → 0..100 (rounded). Returns null when either is missing/invalid. */
 function pct(
@@ -53,27 +58,14 @@ async function fetchKimiUsage(
 	apiKey: string,
 	timeoutMs = 10000,
 ): Promise<FetchResult> {
-	let res: Response;
-	try {
-		res = await fetch(ENDPOINT, {
-			headers: {
-				Authorization: `Bearer ${apiKey}`,
-				Accept: "application/json",
-			},
-			signal: AbortSignal.timeout(timeoutMs),
-		});
-	} catch (e) {
-		return { ok: false, reason: "network", message: String(e) };
-	}
+	const res = await getJson(
+		ENDPOINT,
+		{ Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+		timeoutMs,
+	);
+	if (!res.ok) return res;
 
-	if (res.status === 401 || res.status === 403) {
-		return { ok: false, reason: "auth_failed", message: `HTTP ${res.status}` };
-	}
-	if (!res.ok) {
-		return { ok: false, reason: "http_error", message: `HTTP ${res.status}` };
-	}
-
-	let json: {
+	const json = res.json as {
 		usage?: {
 			limit?: string;
 			used?: string;
@@ -85,11 +77,6 @@ async function fetchKimiUsage(
 			detail?: { limit?: string; remaining?: string; resetTime?: string };
 		}>;
 	};
-	try {
-		json = (await res.json()) as typeof json;
-	} catch (e) {
-		return { ok: false, reason: "parse_error", message: String(e) };
-	}
 
 	// 7-day window: top-level `usage`.
 	const seven = json.usage;
@@ -108,11 +95,19 @@ async function fetchKimiUsage(
 	const usage: ProviderUsage = {
 		fiveHour:
 			fiveHourPct !== null
-				? { usedPct: fiveHourPct, resetsAt: five?.resetTime ?? "" }
+				? {
+						usedPct: fiveHourPct,
+						resetsAt: five?.resetTime ?? "",
+						windowMs: FIVE_H_MS,
+					}
 				: null,
 		sevenDay:
 			sevenDayPct !== null
-				? { usedPct: sevenDayPct, resetsAt: seven?.resetTime ?? "" }
+				? {
+						usedPct: sevenDayPct,
+						resetsAt: seven?.resetTime ?? "",
+						windowMs: SEVEN_D_MS,
+					}
 				: null,
 		fetchedAt: new Date().toISOString(),
 	};

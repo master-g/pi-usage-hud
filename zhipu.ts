@@ -16,6 +16,7 @@
  * need to keep a separate, expiring web dashboard token in sync.
  */
 
+import { getJson } from "./provider.js";
 import type {
 	ProviderAdapter,
 	ProviderUsage,
@@ -27,6 +28,11 @@ export type { ProviderUsage, FetchResult } from "./provider.js";
 // unit codes returned by the API — see file header for derivation
 const UNIT_5H = 3;
 const UNIT_7D = 6;
+/** Window lengths behind those unit codes (5h / 7d). */
+const WINDOW_MS: Record<number, number> = {
+	[UNIT_5H]: 5 * 3600_000,
+	[UNIT_7D]: 7 * 24 * 3600_000,
+};
 
 const ENDPOINT = "https://bigmodel.cn/api/monitor/usage/quota/limit";
 
@@ -46,37 +52,22 @@ async function fetchZhipuUsage(
 	apiKey: string,
 	timeoutMs = 10000,
 ): Promise<FetchResult> {
-	let res: Response;
-	try {
-		res = await fetch(ENDPOINT, {
-			headers: {
-				// Bare API key — verified to work without Bearer prefix or
-				// org/project headers. Returns identical account data.
-				Authorization: apiKey,
-				Accept: "application/json",
-			},
-			signal: AbortSignal.timeout(timeoutMs),
-		});
-	} catch (e) {
-		return { ok: false, reason: "network", message: String(e) };
-	}
+	const res = await getJson(
+		ENDPOINT,
+		{
+			// Bare API key — verified to work without Bearer prefix or
+			// org/project headers. Returns identical account data.
+			Authorization: apiKey,
+			Accept: "application/json",
+		},
+		timeoutMs,
+	);
+	if (!res.ok) return res;
 
-	if (res.status === 401 || res.status === 403) {
-		return { ok: false, reason: "auth_failed", message: `HTTP ${res.status}` };
-	}
-	if (!res.ok) {
-		return { ok: false, reason: "http_error", message: `HTTP ${res.status}` };
-	}
-
-	let json: {
+	const json = res.json as {
 		code?: number;
 		data?: { limits?: ApiLimit[] };
 	};
-	try {
-		json = (await res.json()) as typeof json;
-	} catch (e) {
-		return { ok: false, reason: "parse_error", message: String(e) };
-	}
 
 	// Some failure modes return HTTP 200 with a non-200 code body.
 	if (typeof json.code === "number" && json.code !== 200) {
@@ -89,20 +80,15 @@ async function fetchZhipuUsage(
 	const find = (unit: number) => json.data!.limits!.find((l) => l.unit === unit);
 	const h = find(UNIT_5H);
 	const d = find(UNIT_7D);
+	const windowOf = (l: ApiLimit) => ({
+		usedPct: l.percentage,
+		resetsAt: toIso(l.nextResetTime),
+		windowMs: WINDOW_MS[l.unit],
+	});
 
 	const usage: ProviderUsage = {
-		fiveHour: h
-			? {
-					usedPct: h.percentage,
-					resetsAt: toIso(h.nextResetTime),
-				}
-			: null,
-		sevenDay: d
-			? {
-					usedPct: d.percentage,
-					resetsAt: toIso(d.nextResetTime),
-				}
-			: null,
+		fiveHour: h ? windowOf(h) : null,
+		sevenDay: d ? windowOf(d) : null,
 		fetchedAt: new Date().toISOString(),
 	};
 

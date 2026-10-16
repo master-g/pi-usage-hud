@@ -67,6 +67,11 @@ try {
 			new Date(Math.floor((now + 2.5 * 3600_000) / 1000) * 1000).toISOString(),
 		"5h reset mismatch",
 	);
+	assert(
+		result.usage.fiveHour?.windowMs === 5 * 3600_000 &&
+			result.usage.sevenDay?.windowMs === 7 * 24 * 3600_000,
+		"window durations not carried",
+	);
 
 	const line = renderHudLine(
 		{ fg: (color: string, text: string) => `{${color}}${text}` },

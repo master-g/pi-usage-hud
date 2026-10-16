@@ -39,7 +39,7 @@ export function snapshotPath(provider: string): string {
 		: path.join(os.homedir(), ".pi", "agent", `${provider}-quota.json`);
 }
 
-interface Snapshot {
+export interface Snapshot {
 	usage?: ProviderUsage | null;
 	updatedAt?: string;
 	error?: string;

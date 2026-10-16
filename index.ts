@@ -14,6 +14,9 @@
  * To add a provider: add `xxx.ts` exporting a ProviderAdapter, then register
  * it in the `PROVIDERS` array below.
  *
+ * The fetch/cooldown/snapshot pipeline lives in refresh.ts; this file is
+ * only the provider registry, widget lifecycle and event wiring.
+ *
  * Design:
  *   - Only renders when the active model's provider has a fetcher here.
  *   - Resolves credentials through pi's model registry, including OAuth token
@@ -34,8 +37,9 @@ import type { ProviderAdapter } from "./provider.js";
 import { zhipu } from "./zhipu.js";
 import { kimi } from "./kimi.js";
 import { codex } from "./codex.js";
-import { getStored, shouldFetch, writeError, writeSuccess } from "./store.js";
+import { getStored } from "./store.js";
 import { renderHudLine, type HudStatus } from "./render.js";
+import { credsHint, refreshUsage, statusFromSnapshot } from "./refresh.js";
 
 // ─── Provider registry ──────────────────────────────────────────────────────
 // Order matters only for diagnostics; dispatch is by provider-name match.
@@ -56,8 +60,6 @@ function adapterFor(provider: string | undefined): ProviderAdapter | null {
 
 const WIDGET_NAME = "usage-hud";
 const TICK_MS = 30_000;
-/** Mark data as stale for display once the last success is older than this. */
-const STALE_MS = 2 * 60_000;
 
 /** Find the first configured pi provider that can supply this adapter's credential. */
 function credentialProvider(
@@ -83,49 +85,9 @@ async function resolveCredential(
 	return (await ctx.modelRegistry.getApiKeyForProvider(provider)) ?? null;
 }
 
-/** Human-readable credential hint for the no_creds state. */
-function credsHint(adapter: ProviderAdapter): string {
-	return `未找到 ${adapter.name} 凭据（provider: ${adapter.authKeys.join(" / ")}）`;
-}
-
-/** Decide which HUD variant to show from stored snapshot + credential state. */
-function currentStatus(
-	adapter: ProviderAdapter,
-	hasCredentials: boolean,
-): HudStatus {
-	if (!hasCredentials) {
-		return {
-			kind: "no_creds",
-			providerName: adapter.name,
-			hint: credsHint(adapter),
-		};
-	}
-	const snap = getStored(adapter.name);
-	if (snap.usage) {
-		const ageMs = snap.updatedAt
-			? Date.now() - new Date(snap.updatedAt).getTime()
-			: Infinity;
-		if (ageMs > STALE_MS && snap.error) {
-			return {
-				kind: "stale",
-				usage: snap.usage,
-				reason: snap.errorReason ?? "fetch_failed",
-			};
-		}
-		return { kind: "ok", usage: snap.usage };
-	}
-	if (snap.error) {
-		return {
-			kind: "stale",
-			usage: null,
-			reason: snap.errorReason ?? "fetch_failed",
-		};
-	}
-	return { kind: "stale", usage: null, reason: "pending" };
-}
-
 /**
- * Owns the widget lifecycle + background fetch scheduling for one pi process.
+ * Owns the widget lifecycle + event wiring for one pi process; the
+ * fetch/cooldown/snapshot pipeline itself lives in refresh.ts.
  *
  * Rendering strategy: the widget is mounted ONCE via the component-factory
  * form of `ctx.ui.setWidget`. We never call `setWidget` again — updates are
@@ -163,7 +125,11 @@ class HudController {
 		const adapter = adapterFor(ctx?.model?.provider);
 		this.cachedStatus =
 			adapter && ctx
-				? currentStatus(adapter, credentialProvider(adapter, ctx) !== null)
+				? statusFromSnapshot(
+						getStored(adapter.name),
+						credentialProvider(adapter, ctx) !== null,
+						adapter,
+					)
 				: null;
 	}
 
@@ -220,75 +186,65 @@ class HudController {
 		this.repaint();
 	}
 
-	/** Cooldown-guarded background refresh (session_start / agent_end / tick). */
-	async refresh(ctx: ExtensionContext): Promise<void> {
+	/**
+	 * One refresh path for every trigger: session_start / agent_end / tick
+	 * run cooldown-guarded; the /usage-hud command forces and notifies.
+	 */
+	private async runRefresh(
+		ctx: ExtensionContext,
+		opts: { force?: boolean; notify?: boolean } = {},
+	): Promise<void> {
 		this.ctx = ctx;
 		const adapter = adapterFor(ctx.model?.provider);
-		if (!adapter || !shouldFetch(adapter.name) || this.fetching) {
+		if (!adapter) {
+			if (opts.notify) {
+				ctx.ui.notify(
+					`当前 provider (${ctx.model?.provider ?? "none"}) 没有用量 fetcher（支持：${PROVIDERS.map((p) => p.name).join(", ")}）`,
+					"info",
+				);
+			}
+			this.repaint();
+			return;
+		}
+		if (this.fetching) {
+			if (opts.notify) {
+				ctx.ui.notify("已有刷新进行中，完成后自动更新", "info");
+			}
 			this.repaint();
 			return;
 		}
 		this.fetching = true;
 		try {
-			let credential: string | null;
-			try {
-				credential = await resolveCredential(adapter, ctx);
-			} catch (e) {
-				writeError(adapter.name, "auth_failed", String(e));
-				return;
+			const { status, outcome, reason } = await refreshUsage(
+				adapter,
+				credentialProvider(adapter, ctx) !== null,
+				() => resolveCredential(adapter, ctx),
+				{ force: opts.force },
+			);
+			this.cachedStatus = status;
+			if (opts.notify) {
+				if (outcome === "fetched") {
+					ctx.ui.notify(`${adapter.name} 用量已刷新`, "info");
+				} else if (outcome === "no_credential") {
+					ctx.ui.notify(credsHint(adapter), "warning");
+				} else if (outcome === "failed") {
+					ctx.ui.notify(`刷新失败：${reason}`, "error");
+				}
 			}
-			if (!credential) return;
-			const result = await adapter.fetch(credential);
-			if (result.ok) writeSuccess(adapter.name, result.usage);
-			else writeError(adapter.name, result.reason, result.message);
-		} catch (e) {
-			writeError(adapter.name, "network", String(e));
 		} finally {
 			this.fetching = false;
-			this.repaint();
+			this.requestRender?.();
 		}
+	}
+
+	/** Cooldown-guarded background refresh (session_start / agent_end / tick). */
+	async refresh(ctx: ExtensionContext): Promise<void> {
+		return this.runRefresh(ctx);
 	}
 
 	/** Forced refresh for the `/usage-hud` command (bypasses the cooldown). */
 	async refreshNow(ctx: ExtensionContext): Promise<void> {
-		this.ctx = ctx;
-		const adapter = adapterFor(ctx.model?.provider);
-		if (!adapter) {
-			ctx.ui.notify(
-				`当前 provider (${ctx.model?.provider ?? "none"}) 没有用量 fetcher（支持：${PROVIDERS.map((p) => p.name).join(", ")}）`,
-				"info",
-			);
-			this.repaint();
-			return;
-		}
-		let credential: string | null;
-		try {
-			credential = await resolveCredential(adapter, ctx);
-		} catch (e) {
-			writeError(adapter.name, "auth_failed", String(e));
-			ctx.ui.notify("刷新失败：auth_failed", "error");
-			this.repaint();
-			return;
-		}
-		if (!credential) {
-			ctx.ui.notify(credsHint(adapter), "warning");
-			this.repaint();
-			return;
-		}
-		try {
-			const result = await adapter.fetch(credential);
-			if (result.ok) {
-				writeSuccess(adapter.name, result.usage);
-				ctx.ui.notify(`${adapter.name} 用量已刷新`, "info");
-			} else {
-				writeError(adapter.name, result.reason, result.message);
-				ctx.ui.notify(`刷新失败：${result.reason}`, "error");
-			}
-		} catch (e) {
-			writeError(adapter.name, "network", String(e));
-			ctx.ui.notify("刷新失败：network", "error");
-		}
-		this.repaint();
+		return this.runRefresh(ctx, { force: true, notify: true });
 	}
 
 	startInterval(ctx: ExtensionContext): void {
@@ -297,13 +253,10 @@ class HudController {
 		this.interval = setInterval(() => {
 			const adapter = adapterFor(this.ctx?.model?.provider);
 			if (!adapter) return;
-			// Cheap repaint from cache keeps the reset countdown fresh; only
-			// hit the network when the cooldown has elapsed.
-			if (shouldFetch(adapter.name) && !this.fetching) {
-				void this.refresh(this.ctx!);
-			} else {
-				this.repaint();
-			}
+			// The cooldown lives in the pipeline, so the tick is unconditional:
+			// on cooldown it just re-renders from cache (keeps the reset
+			// countdown fresh); when due it fetches.
+			void this.runRefresh(this.ctx!);
 		}, TICK_MS);
 	}
 

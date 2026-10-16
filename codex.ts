@@ -6,6 +6,7 @@
  * `additional_rate_limits` (for example Codex Spark) are intentionally ignored.
  */
 
+import { getJson } from "./provider.js";
 import type {
 	FetchResult,
 	ProviderAdapter,
@@ -43,12 +44,17 @@ function accountId(token: string): string | null {
 function normalizeWindow(window: RateLimitWindow | null | undefined): WindowUsage | null {
 	if (!window || !Number.isFinite(window.used_percent)) return null;
 	const reset = window.reset_at;
+	const seconds = window.limit_window_seconds;
 	return {
 		usedPct: Math.min(100, Math.max(0, window.used_percent!)),
 		resetsAt:
 			typeof reset === "number" && Number.isFinite(reset)
 				? new Date(reset * 1000).toISOString()
 				: "",
+		windowMs:
+			typeof seconds === "number" && Number.isFinite(seconds)
+				? seconds * 1000
+				: undefined,
 	};
 }
 
@@ -61,33 +67,18 @@ export async function fetchCodexUsage(
 		return { ok: false, reason: "auth_failed", message: "missing account ID" };
 	}
 
-	let res: Response;
-	try {
-		res = await fetch(ENDPOINT, {
-			headers: {
-				Authorization: `Bearer ${accessToken}`,
-				"ChatGPT-Account-Id": account,
-				Accept: "application/json",
-			},
-			signal: AbortSignal.timeout(timeoutMs),
-		});
-	} catch (e) {
-		return { ok: false, reason: "network", message: String(e) };
-	}
+	const res = await getJson(
+		ENDPOINT,
+		{
+			Authorization: `Bearer ${accessToken}`,
+			"ChatGPT-Account-Id": account,
+			Accept: "application/json",
+		},
+		timeoutMs,
+	);
+	if (!res.ok) return res;
 
-	if (res.status === 401 || res.status === 403) {
-		return { ok: false, reason: "auth_failed", message: `HTTP ${res.status}` };
-	}
-	if (!res.ok) {
-		return { ok: false, reason: "http_error", message: `HTTP ${res.status}` };
-	}
-
-	let json: { rate_limit?: RateLimit | null };
-	try {
-		json = (await res.json()) as typeof json;
-	} catch (e) {
-		return { ok: false, reason: "parse_error", message: String(e) };
-	}
+	const json = res.json as { rate_limit?: RateLimit | null };
 	if (!json.rate_limit) {
 		return { ok: false, reason: "parse_error", message: "missing rate_limit" };
 	}

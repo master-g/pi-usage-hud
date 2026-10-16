@@ -18,14 +18,21 @@ const theme = {
   fg: (_color: string, text: string) => `\x1b[38;2;1;2;3m${text}\x1b[39m`,
 };
 
+const FIVE_H = 5 * 3600_000;
+const SEVEN_D = 7 * 24 * 3600_000;
+
 function usage(fivePct: number | null, sevenPct: number | null): ProviderUsage {
   const inHours = (h: number) =>
     new Date(Date.now() + h * 3600_000).toISOString();
   return {
     fiveHour:
-      fivePct === null ? null : { usedPct: fivePct, resetsAt: inHours(1.65) },
+      fivePct === null
+        ? null
+        : { usedPct: fivePct, resetsAt: inHours(1.65), windowMs: FIVE_H },
     sevenDay:
-      sevenPct === null ? null : { usedPct: sevenPct, resetsAt: inHours(120) },
+      sevenPct === null
+        ? null
+        : { usedPct: sevenPct, resetsAt: inHours(120), windowMs: SEVEN_D },
     fetchedAt: new Date().toISOString(),
   };
 }
@@ -80,13 +87,12 @@ console.log(`53-col stale line (${visibleWidth(crashed)} cols): ${crashed}`);
 
 // ─── Pace cursor ────────────────────────────────────────────────────────────
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
-const FIVE_H = 5 * 3600_000;
-const SEVEN_D = 7 * 24 * 3600_000;
 /** Usage whose 5h window is `elapsed` fraction through (7d absent). */
 const atElapsed = (pct: number, elapsed: number): ProviderUsage => ({
   fiveHour: {
     usedPct: pct,
     resetsAt: new Date(Date.now() + (1 - elapsed) * FIVE_H).toISOString(),
+    windowMs: FIVE_H,
   },
   sevenDay: null,
   fetchedAt: new Date().toISOString(),
@@ -140,6 +146,7 @@ const miss5: ProviderUsage = {
   sevenDay: {
     usedPct: 29,
     resetsAt: new Date(Date.now() + (1 - 0.5) * SEVEN_D).toISOString(),
+    windowMs: SEVEN_D,
   },
   fetchedAt: new Date().toISOString(),
 };
@@ -197,7 +204,7 @@ if (
 // Unknown/unparseable resetsAt (e.g. zhipu omitting nextResetTime) counts
 // down "now" — never "NaNm" — and hides the pace cursor.
 const unknownReset: ProviderUsage = {
-  fiveHour: { usedPct: 12, resetsAt: "" },
+  fiveHour: { usedPct: 12, resetsAt: "", windowMs: FIVE_H },
   sevenDay: null,
   fetchedAt: new Date().toISOString(),
 };
@@ -212,3 +219,28 @@ if (unknownLine.includes("{accent}")) {
 console.log(
   "ok — reset hourglass: full / half / nearly-empty / empty / missing",
 );
+
+// Pre-windowMs snapshots (reset known, window length absent): the countdown
+// text still comes from resetsAt, but the pace cursor hides and the
+// hourglass degrades to empty — no window length, no remaining fraction.
+const legacy: ProviderUsage = {
+  fiveHour: {
+    usedPct: 40,
+    resetsAt: new Date(Date.now() + 2 * 3600_000).toISOString(),
+  },
+  sevenDay: null,
+  fetchedAt: new Date().toISOString(),
+};
+const legacyLineC = okLineC(legacy);
+if (legacyLineC.includes("{accent}")) {
+  throw new Error(`cursor shown without windowMs: ${legacyLineC}`);
+}
+const legacyLine = stripAnsi(okLine(legacy));
+if (!legacyLine.includes(DONE)) {
+  throw new Error(`hourglass should degrade to empty without windowMs: ${legacyLine}`);
+}
+if (!legacyLine.includes("2h")) {
+  throw new Error(`countdown should still use resetsAt without windowMs: ${legacyLine}`);
+}
+
+console.log("ok — pre-windowMs snapshot: cursor hidden, hourglass empty, countdown intact");

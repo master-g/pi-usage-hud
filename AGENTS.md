@@ -10,7 +10,7 @@
 
 ## 导航
 
-- 单包扁平仓库，源码都在根目录：`index.ts` 入口（provider 注册表 `PROVIDERS` + `HudController`），`provider.ts` 定义 `ProviderAdapter` 契约，`codex.ts` / `kimi.ts` / `zhipu.ts` 各实现一个 provider，`store.ts` 管快照文件与冷却，`render.ts` 渲染 HUD 行。
+- 单包扁平仓库，源码都在根目录：`index.ts` 入口（provider 注册表 `PROVIDERS` + `HudController`），`refresh.ts` 是 fetch/冷却/快照管线（`UsageStore` seam + 纯函数状态推导），`provider.ts` 定义 `ProviderAdapter` 契约与共享 `getJson`，`codex.ts` / `kimi.ts` / `zhipu.ts` 各实现一个 provider，`store.ts` 管快照文件与冷却，`render.ts` 渲染 HUD 行。
 - 新增 provider：加 `xxx.ts` 导出 `ProviderAdapter`，再登记到 `index.ts` 的 `PROVIDERS`。
 
 ## 命令
@@ -35,7 +35,7 @@
 ## 代码风格
 
 - 无 lint/formatter 配置；沿用所改文件的现有风格：多数文件 tab 缩进（`render.ts`、`render.test.ts` 用两空格），双引号、分号，相对导入写 `.js` 后缀（`./provider.js`）。
-- provider 模块之间不互相依赖，只依赖 `provider.ts` 的类型；网络、鉴权错误统一返回 `FetchResult`（`ok: false` + `reason`），不抛异常。
+- provider 模块之间不互相依赖，只依赖 `provider.ts`（契约 + `getJson`）；网络、鉴权错误统一返回 `FetchResult`（`ok: false` + `reason`），不抛异常。
 
 ## 禁止文件
 

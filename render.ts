@@ -16,9 +16,9 @@
  * drawn as ▎ when unfilled (█ once the fill reaches it), so it stays
  * recognizable by shape even in themes where accent ≈ the fill color.
  * Fill left of it = 富余, fill past it = 偏快. Zero width cost — it replaces
- * a cell instead of adding one. Hidden when the window just started (<5%
- * elapsed, pace is noise there) or the reset time is unknown/unparseable/
- * already past.
+ * a cell instead of adding one. Hidden when the window length is unknown
+ * (pre-windowMs snapshots), the window just started (<5% elapsed, pace is
+ * noise there) or the reset time is unknown/unparseable/already past.
  *
  * The countdown icon is an hourglass showing the remaining fraction of the
  * window:  full (just reset) →  half →  nearly empty →  empty
@@ -82,24 +82,15 @@ function pctColor(pct: number): string {
  return "success";
 }
 
-/** Window durations by label, used to place the pace cursor. */
-const WINDOW_MS: Record<string, number> = {
- "5h": 5 * 3600_000,
- "7d": 7 * 24 * 3600_000,
-};
-
 /**
  * Bar cell where usage would sit under uniform consumption, or -1 to hide
- * the cursor: missing window, unparseable reset, window just started (<5%
- * elapsed — pace is noise there), or reset at/past now (nothing left to
- * pace). A reset further out than the window length clamps to 0 and hides.
+ * the cursor: unknown window length (pre-windowMs snapshots), unparseable
+ * reset, window just started (<5% elapsed — pace is noise there), or reset
+ * at/past now (nothing left to pace). A reset further out than the window
+ * length clamps to 0 and hides.
  */
-function paceMarker(
- label: string,
- win: WindowUsage | null,
- barWidth: number,
-): number {
- const windowMs = WINDOW_MS[label];
+function paceMarker(win: WindowUsage | null, barWidth: number): number {
+ const windowMs = win?.windowMs;
  if (!win || !windowMs || barWidth <= 0) return -1;
  const resetMs = new Date(win.resetsAt).getTime();
  if (Number.isNaN(resetMs)) return -1;
@@ -114,8 +105,8 @@ function paceMarker(
  * empty (reset due now). Unknown/unparseable reset falls through to
  * empty, matching the "now" countdown shown in that case.
  */
-function resetIcon(label: string, win: WindowUsage | null): string {
- const windowMs = WINDOW_MS[label];
+function resetIcon(win: WindowUsage | null): string {
+ const windowMs = win?.windowMs;
  const resetMs = win ? new Date(win.resetsAt).getTime() : NaN;
  if (!windowMs || Number.isNaN(resetMs)) return "\u{f250}";
  const remaining = (resetMs - Date.now()) / windowMs;
@@ -179,7 +170,7 @@ function windowSegment(
  const parts = [theme.fg("dim", label)];
  let width = label.length;
  if (barWidth > 0) {
-  const cells = barCells(usedPct, barWidth, paceMarker(label, win, barWidth))
+  const cells = barCells(usedPct, barWidth, paceMarker(win, barWidth))
    .map((c) => theme.fg(c.accent ? "accent" : color, c.ch))
    .join("");
   parts.push(cells);
@@ -189,7 +180,7 @@ function windowSegment(
  width += 1 + pct.length;
  if (showReset) {
   // Missing windows count down from "now" → displays "now".
-  const reset = `${resetIcon(label, win)} ${resetCountdown(win?.resetsAt ?? new Date().toISOString())}`;
+  const reset = `${resetIcon(win)} ${resetCountdown(win?.resetsAt ?? new Date().toISOString())}`;
   parts.push(theme.fg("dim", reset));
   width += 1 + reset.length;
  }
