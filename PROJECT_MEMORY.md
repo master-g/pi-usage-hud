@@ -19,10 +19,10 @@
 
 <!-- 整块改写：分支、验证命令及实际结果、停在何处；任务细节只留一行指向证据目录。 -->
 
-master 分支，未提交。完成架构评审（报告在 /tmp/architecture-review-20261016-142209.html）并落地候选 A+B+C：新增 `refresh.ts`、`GLOSSARY.md`，改 `provider.ts`/`render.ts`/`index.ts`/三个 adapter/两个既有测试，新增 `refresh.test.ts`。随后跑了两轴 code-review（Standards/Spec 均 PASS），应用三条修复：refreshNow 在 fetch 进行中时通知而非静默、AGENTS.md 风格节改为「契约 + getJson」、refresh.ts 局部 store 改名 usageStore。验证：`bun test` 退出码 0（七组 ok 行），`npm run typecheck` 通过。停在未提交状态。
+main 分支，已提交并发布。完成架构评审（报告在 /tmp/architecture-review-20261016-142209.html）并落地候选 A+B+C：新增 `refresh.ts`、`GLOSSARY.md`，改 `provider.ts`/`render.ts`/`index.ts`/三个 adapter/两个既有测试，新增 `refresh.test.ts`。随后两轴 code-review（Standards/Spec 均 PASS）并应用三条修复。验证：`bun test` 退出码 0（七组 ok 行），`npm run typecheck` 通过。3a73824 提交为 0.2.0，npm 发布遇 EOTP 由用户手动完成，registry 已确认 0.2.0。
 
 ## 下次运行
 
 <!-- 整块改写：接下来的任务和优先级，含仍受阻的项。 -->
 
-提交并推送本次改动（`git push` 需用户确认）；无其他待办。
+无待办。下次会话若继续架构评审候选：B 的窗口时长合并（kimi/zhipu 两处常量）与 A 的签名对齐被刻意搁置，原因见评审结论。
